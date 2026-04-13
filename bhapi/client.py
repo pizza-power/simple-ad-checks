@@ -16,7 +16,7 @@ import logging
 import re
 import time
 from typing import Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import quote, urlencode
 
 import requests
 
@@ -65,8 +65,8 @@ class BHSession:
 
     def test_connection(self) -> dict:
         """
-        Hit the API version endpoint to verify connectivity and auth.
-        Returns the version info dict on success, raises on failure.
+        Hit the API self endpoint to verify connectivity and auth.
+        Returns the user info dict on success, raises on failure.
         """
         log.info("Testing connection to %s ...", self._base_url)
 
@@ -98,7 +98,12 @@ class BHSession:
     # ------------------------------------------------------------------
 
     def get(self, uri: str, params: dict | None = None, timeout: int = 120) -> Any:
-        return self._request("GET", uri, params=params, timeout=timeout)
+        # Match the official SpecterOps client pattern: bake query params
+        # directly into the URI so the HMAC signature covers them exactly.
+        if params:
+            qs = urlencode(params)
+            uri = f"{uri}?{qs}"
+        return self._request("GET", uri, timeout=timeout)
 
     def post(self, uri: str, body: dict | None = None, timeout: int = 120) -> Any:
         return self._request("POST", uri, body=body, timeout=timeout)
@@ -113,12 +118,16 @@ class BHSession:
         """Search the graph for a node by name."""
         return self.get("/api/v2/graph-search", params={"query": query, "type": search_type})
 
+    def get_domains(self) -> list[dict]:
+        """List available domains from the API."""
+        return self.get("/api/v2/available-domains")
+
     def paginate(self, uri: str, page_size: int = 100) -> list[dict]:
         """Auto-paginate a list endpoint, returning all items."""
         items: list[dict] = []
         skip = 0
         while True:
-            resp = self.get(uri, params={"skip": skip, "limit": page_size, "type": "list"})
+            resp = self.get(uri, params={"skip": str(skip), "limit": str(page_size), "type": "list"})
             data = resp.get("data", [])
             items.extend(data)
             total = resp.get("count", 0)
@@ -131,10 +140,17 @@ class BHSession:
     # HMAC request signing (per SpecterOps spec)
     # ------------------------------------------------------------------
 
-    def _sign(self, method: str, uri: str, body: Optional[bytes]) -> dict[str, str]:
+    def _sign(self, method: str, uri: str, body: Optional[bytes]) -> tuple[dict[str, str], str]:
+        """
+        Sign a request per the BloodHound HMAC spec.
+        Returns (headers_dict, datetime_formatted).
+
+        The ``uri`` MUST include the query string if present, matching
+        exactly what appears in the HTTP request line.
+        """
         digester = hmac.new(self._token_key.encode(), None, hashlib.sha256)
 
-        # OperationKey: method + URI
+        # OperationKey: method + URI (including query string)
         digester.update(f"{method}{uri}".encode())
         digester = hmac.new(digester.digest(), None, hashlib.sha256)
 
@@ -144,32 +160,37 @@ class BHSession:
         digester = hmac.new(digester.digest(), None, hashlib.sha256)
 
         # Body signing
-        if body:
+        if body is not None:
             digester.update(body)
 
-        return {
+        headers = {
             "User-Agent": "adchecker/1.0",
             "Authorization": f"bhesignature {self._token_id}",
             "RequestDate": now,
-            "Signature": base64.b64encode(digester.digest()).decode(),
+            "Signature": base64.b64encode(digester.digest()),
             "Content-Type": "application/json",
         }
+        return headers, now
 
     def _request(
         self,
         method: str,
         uri: str,
         body: dict | None = None,
-        params: dict | None = None,
         timeout: int = 120,
     ) -> Any:
+        """
+        Execute a signed request.  Query parameters must already be
+        baked into ``uri`` (e.g. ``/api/v2/foo?bar=1``).  This matches
+        the official SpecterOps client pattern and guarantees the HMAC
+        signature covers the exact URI sent on the wire.
+        """
         encoded_body = json.dumps(body).encode() if body else None
-        headers = self._sign(method, uri, encoded_body)
-
         url = f"{self._base_url}{uri}"
         backoff = self.RETRY_BACKOFF
 
         for attempt in range(1, self.MAX_RETRIES + 1):
+            headers, _ = self._sign(method, uri, encoded_body)
             log.debug("%s %s (attempt %d/%d)", method, url, attempt, self.MAX_RETRIES)
 
             try:
@@ -178,7 +199,6 @@ class BHSession:
                     url=url,
                     headers=headers,
                     data=encoded_body,
-                    params=params,
                     timeout=timeout,
                 )
             except requests.ConnectionError as exc:
@@ -192,7 +212,6 @@ class BHSession:
                     log.warning("Rate limited (429), retrying in %ds ...", backoff)
                     time.sleep(backoff)
                     backoff *= 2
-                    headers = self._sign(method, uri, encoded_body)
                     continue
 
             if resp.status_code >= 400:
