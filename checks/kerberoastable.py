@@ -7,8 +7,12 @@ making them vulnerable to offline Kerberos ticket cracking.
 
 from __future__ import annotations
 
+import logging
+
 from checks import BaseCheck, CheckResult, register
 from bhapi.client import BHSession
+
+log = logging.getLogger("adchecker.checks.kerberoastable")
 
 _CYPHER = """
 MATCH (u:User {{domain: "{domain}"}})
@@ -34,10 +38,12 @@ class KerberoastableCheck(BaseCheck):
     def run(self, session: BHSession, domain: str, **kwargs) -> CheckResult:
         query = _CYPHER.format(domain=domain)
         rows: list[list[str]] = []
+        log.info("Querying kerberoastable users for domain: %s", domain)
 
         try:
             result = session.cypher(query)
         except Exception as exc:
+            log.error("Cypher query failed: %s", exc)
             return CheckResult(
                 check_id=self.check_id,
                 title=self.title,
@@ -48,6 +54,7 @@ class KerberoastableCheck(BaseCheck):
             )
 
         nodes = result.get("nodes", {})
+        log.info("  %d nodes returned", len(nodes))
         for node_id, node in nodes.items():
             props = node.get("properties", {}) or {}
             kinds = node.get("kinds", [])

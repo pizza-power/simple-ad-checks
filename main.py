@@ -8,6 +8,7 @@ Generates one self-contained HTML report per configured domain.
 
 from __future__ import annotations
 
+import logging
 import sys
 import time
 
@@ -16,9 +17,20 @@ from bhapi.client import BHSession
 from checks import get_all_checks, CheckResult
 from report.renderer import write_report
 
+log = logging.getLogger("adchecker")
 
-def _log(msg: str) -> None:
-    print(f"[adchecker] {msg}", flush=True)
+
+def _setup_logging() -> None:
+    fmt = "[%(asctime)s] %(levelname)-7s %(name)s — %(message)s"
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format=fmt,
+        datefmt="%Y-%m-%d %H:%M:%S",
+        stream=sys.stdout,
+    )
+    # Quiet down noisy libraries
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("requests").setLevel(logging.WARNING)
 
 
 def run_domain(session: BHSession, domain: str) -> list[CheckResult]:
@@ -27,7 +39,7 @@ def run_domain(session: BHSession, domain: str) -> list[CheckResult]:
     results: list[CheckResult] = []
 
     for check in checks:
-        _log(f"  Running: {check.title} ...")
+        log.info("  Running check: %s ...", check.title)
         t0 = time.monotonic()
         try:
             result = check.run(
@@ -36,7 +48,7 @@ def run_domain(session: BHSession, domain: str) -> list[CheckResult]:
                 large_group_threshold=config.BH_LARGE_GROUP_THRESHOLD,
             )
         except Exception as exc:
-            _log(f"  ERROR in {check.check_id}: {exc}")
+            log.error("  FAILED: %s — %s", check.check_id, exc, exc_info=True)
             result = CheckResult(
                 check_id=check.check_id,
                 title=check.title,
@@ -46,15 +58,25 @@ def run_domain(session: BHSession, domain: str) -> list[CheckResult]:
                 severity="info",
             )
         elapsed = time.monotonic() - t0
-        _log(f"  Done: {check.title} — {result.count} findings ({elapsed:.1f}s)")
+        log.info(
+            "  Done: %s — %d finding(s) [%s] (%.1fs)",
+            check.title, result.count, result.severity, elapsed,
+        )
         results.append(result)
 
     return results
 
 
 def main() -> None:
-    _log(f"Starting — {len(config.BH_DOMAINS)} domain(s) configured")
-    _log(f"BloodHound CE: {config.BH_BASE_URL}")
+    _setup_logging()
+
+    log.info("=" * 60)
+    log.info("adchecker starting")
+    log.info("=" * 60)
+    log.info("Domains configured: %s", ", ".join(config.BH_DOMAINS))
+    log.info("BloodHound CE URL:  %s", config.BH_BASE_URL)
+    log.info("Report output dir:  %s", config.BH_REPORT_DIR)
+    log.info("Large group threshold: %d", config.BH_LARGE_GROUP_THRESHOLD)
 
     session = BHSession(
         base_url=config.BH_BASE_URL,
@@ -62,21 +84,37 @@ def main() -> None:
         token_key=config.BH_TOKEN_KEY,
     )
 
-    for domain in config.BH_DOMAINS:
-        _log(f"Processing domain: {domain}")
-        results = run_domain(session, domain)
-        path = write_report(domain, results, config.BH_REPORT_DIR)
-        _log(f"Report written: {path}")
+    # Pre-flight: verify we can talk to the API and authenticate
+    log.info("-" * 60)
+    log.info("Pre-flight connectivity check ...")
+    try:
+        who = session.test_connection()
+        log.info("Authenticated OK.")
+    except ConnectionError as exc:
+        log.error("CONNECTION FAILED:\n%s", exc)
+        sys.exit(1)
 
-    _log("All domains complete.")
+    log.info("-" * 60)
+    for domain in config.BH_DOMAINS:
+        log.info("Processing domain: %s", domain)
+        results = run_domain(session, domain)
+
+        total = sum(r.count for r in results)
+        log.info("Domain %s complete — %d total findings", domain, total)
+
+        path = write_report(domain, results, config.BH_REPORT_DIR)
+        log.info("Report written: %s", path)
+        log.info("-" * 60)
+
+    log.info("All domains complete.")
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        _log("Interrupted.")
+        log.info("Interrupted.")
         sys.exit(130)
     except Exception as exc:
-        _log(f"Fatal error: {exc}")
+        logging.getLogger("adchecker").error("Fatal error: %s", exc, exc_info=True)
         sys.exit(1)

@@ -8,8 +8,12 @@ dramatically widen the attack surface.
 
 from __future__ import annotations
 
+import logging
+
 from checks import BaseCheck, CheckResult, register
 from bhapi.client import BHSession
+
+log = logging.getLogger("adchecker.checks.large_group_admin")
 
 _CYPHER = """
 MATCH (g:Group {{domain: "{domain}"}})-[:AdminTo]->(c:Computer)
@@ -39,10 +43,12 @@ class LargeGroupAdminCheck(BaseCheck):
         threshold = kwargs.get("large_group_threshold", 300)
         query = _CYPHER.format(domain=domain, threshold=threshold)
         rows: list[list[str]] = []
+        log.info("Querying large groups (>=%d members) with admin rights for: %s", threshold, domain)
 
         try:
             result = session.cypher(query)
         except Exception as exc:
+            log.error("Cypher query failed: %s", exc)
             return CheckResult(
                 check_id=self.check_id,
                 title=self.title,

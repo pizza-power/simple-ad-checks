@@ -9,8 +9,12 @@ target object metadata.
 
 from __future__ import annotations
 
+import logging
+
 from checks import BaseCheck, CheckResult, register
 from bhapi.client import BHSession
+
+log = logging.getLogger("adchecker.checks.outbound_control")
 
 GROUPS = [
     "EVERYONE",
@@ -75,17 +79,21 @@ class OutboundControlCheck(BaseCheck):
         for group in GROUPS:
             fqdn = f"{group}@{domain}"
             query = _CYPHER_TEMPLATE.format(group_fqdn=fqdn)
+            log.info("Querying outbound control for: %s", fqdn)
 
             try:
                 result = session.cypher(query)
             except Exception as exc:
+                log.error("Cypher query failed for %s: %s", fqdn, exc)
                 rows.append([fqdn, "ERROR", str(exc), "", ""])
                 continue
 
             nodes = result.get("nodes", {})
             edges = result.get("edges", [])
+            log.info("  %s: %d nodes, %d edges returned", fqdn, len(nodes), len(edges))
 
             if not edges:
+                log.info("  %s: no outbound control edges (clean)", fqdn)
                 continue
 
             for edge in edges:

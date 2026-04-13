@@ -12,10 +12,38 @@ import datetime
 import hashlib
 import hmac
 import json
+import logging
+import re
 import time
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import requests
+
+log = logging.getLogger("adchecker.api")
+
+
+class BHAPIError(Exception):
+    """Raised when the BloodHound API returns a non-success response."""
+
+    def __init__(self, method: str, url: str, status: int, body: str):
+        self.method = method
+        self.url = url
+        self.status = status
+        self.body = body
+        super().__init__(f"HTTP {status} {method} {url} — {body[:300]}")
+
+
+def _clean_base_url(url: str) -> str:
+    """
+    Normalise the base URL so it points to the API root.
+    Strips trailing slashes and common UI paths that users
+    might copy from their browser address bar.
+    """
+    url = url.strip().rstrip("/")
+    url = re.sub(r"/ui(/login)?/?$", "", url)
+    url = re.sub(r"/#.*$", "", url)
+    return url
 
 
 class BHSession:
@@ -25,10 +53,45 @@ class BHSession:
     RETRY_BACKOFF = 2  # seconds, doubles each retry
 
     def __init__(self, base_url: str, token_id: str, token_key: str):
-        self._base_url = base_url
+        self._base_url = _clean_base_url(base_url)
         self._token_id = token_id
         self._token_key = token_key
         self._http = requests.Session()
+        log.info("API base URL: %s", self._base_url)
+
+    # ------------------------------------------------------------------
+    # Connectivity check
+    # ------------------------------------------------------------------
+
+    def test_connection(self) -> dict:
+        """
+        Hit the API version endpoint to verify connectivity and auth.
+        Returns the version info dict on success, raises on failure.
+        """
+        log.info("Testing connection to %s ...", self._base_url)
+
+        try:
+            result = self.get("/api/v2/self")
+            log.info("Authenticated successfully.")
+            return result
+        except BHAPIError as exc:
+            if exc.status == 401:
+                raise ConnectionError(
+                    f"Authentication failed (HTTP 401). Check BH_TOKEN_ID and BH_TOKEN_KEY.\n"
+                    f"  URL: {exc.url}\n  Response: {exc.body[:200]}"
+                ) from exc
+            raise ConnectionError(
+                f"API returned HTTP {exc.status}. Is BH_BASE_URL correct?\n"
+                f"  Tried: {exc.url}\n"
+                f"  Response: {exc.body[:200]}\n"
+                f"  Hint: BH_BASE_URL should be the root (e.g. http://host:8080), "
+                f"not the login page."
+            ) from exc
+        except requests.ConnectionError as exc:
+            raise ConnectionError(
+                f"Cannot connect to {self._base_url}. Is the server running?\n"
+                f"  Error: {exc}"
+            ) from exc
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -42,6 +105,7 @@ class BHSession:
 
     def cypher(self, query: str, include_properties: bool = True) -> dict:
         """Run a Cypher query and return the parsed JSON response."""
+        log.debug("Cypher query: %s", query.strip()[:120])
         payload = {"query": query, "include_properties": include_properties}
         return self.post("/api/v2/graphs/cypher", body=payload)
 
@@ -106,24 +170,44 @@ class BHSession:
         backoff = self.RETRY_BACKOFF
 
         for attempt in range(1, self.MAX_RETRIES + 1):
-            resp = self._http.request(
-                method=method,
-                url=url,
-                headers=headers,
-                data=encoded_body,
-                params=params,
-                timeout=timeout,
-            )
+            log.debug("%s %s (attempt %d/%d)", method, url, attempt, self.MAX_RETRIES)
+
+            try:
+                resp = self._http.request(
+                    method=method,
+                    url=url,
+                    headers=headers,
+                    data=encoded_body,
+                    params=params,
+                    timeout=timeout,
+                )
+            except requests.ConnectionError as exc:
+                log.error("Connection failed: %s %s — %s", method, url, exc)
+                raise
+
+            log.debug("Response: HTTP %d (%d bytes)", resp.status_code, len(resp.content))
 
             if resp.status_code == 429:
                 if attempt < self.MAX_RETRIES:
+                    log.warning("Rate limited (429), retrying in %ds ...", backoff)
                     time.sleep(backoff)
                     backoff *= 2
                     headers = self._sign(method, uri, encoded_body)
                     continue
-                resp.raise_for_status()
 
-            resp.raise_for_status()
-            return resp.json().get("data", resp.json())
+            if resp.status_code >= 400:
+                log.error(
+                    "API error: HTTP %d %s %s — %s",
+                    resp.status_code, method, url, resp.text[:300],
+                )
+                raise BHAPIError(method, url, resp.status_code, resp.text)
+
+            try:
+                data = resp.json()
+            except ValueError:
+                log.error("Non-JSON response from %s %s: %s", method, url, resp.text[:200])
+                raise BHAPIError(method, url, resp.status_code, f"Non-JSON response: {resp.text[:200]}")
+
+            return data.get("data", data)
 
         return {}
