@@ -14,15 +14,8 @@ from bhapi.client import BHSession
 
 log = logging.getLogger("adchecker.checks.kerberoastable")
 
-_CYPHER = """
-MATCH (u:User {{domain: "{domain}"}})
-WHERE u.hasspn = true
-  AND u.enabled = true
-RETURN u.name        AS name,
-       u.description AS description,
-       u.admincount  AS admin_count
-ORDER BY u.name
-"""
+# Return full node so results land in 'nodes' dict with all properties.
+_CYPHER = 'MATCH (u:User {{domain: "{domain}"}}) WHERE u.hasspn = true AND u.enabled = true RETURN u'
 
 
 @register
@@ -55,11 +48,9 @@ class KerberoastableCheck(BaseCheck):
 
         nodes = result.get("nodes", {})
         log.info("  %d nodes returned", len(nodes))
+
         for node_id, node in nodes.items():
             props = node.get("properties", {}) or {}
-            kinds = node.get("kinds", [])
-            if "User" not in kinds:
-                continue
             name = props.get("name", node.get("label", node_id))
             desc = props.get("description", "") or ""
             admin = "Yes" if props.get("admincount") else "No"

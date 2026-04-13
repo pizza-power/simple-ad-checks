@@ -14,14 +14,8 @@ from bhapi.client import BHSession
 
 log = logging.getLogger("adchecker.checks.asrep_roastable")
 
-_CYPHER = """
-MATCH (u:User {{domain: "{domain}"}})
-WHERE u.dontreqpreauth = true
-  AND u.enabled = true
-RETURN u.name        AS name,
-       u.description AS description
-ORDER BY u.name
-"""
+# Return full node so results land in 'nodes' dict.
+_CYPHER = 'MATCH (u:User {{domain: "{domain}"}}) WHERE u.dontreqpreauth = true AND u.enabled = true RETURN u'
 
 
 @register
@@ -54,11 +48,9 @@ class ASREPRoastableCheck(BaseCheck):
 
         nodes = result.get("nodes", {})
         log.info("  %d nodes returned", len(nodes))
+
         for node_id, node in nodes.items():
             props = node.get("properties", {}) or {}
-            kinds = node.get("kinds", [])
-            if "User" not in kinds:
-                continue
             name = props.get("name", node.get("label", node_id))
             desc = props.get("description", "") or ""
             rows.append([name, desc])
