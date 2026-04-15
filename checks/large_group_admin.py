@@ -23,9 +23,10 @@ MATCH (g:Group {{domain: "{domain}"}})-[:AdminTo]->(c:Computer)
 WITH g, count(DISTINCT c) AS admin_to_count
 MATCH (g)<-[:MemberOf]-(m)
 WITH g.name AS group_name, g.description AS description,
+     g.system_tags AS group_t0,
      count(DISTINCT m) AS member_count, admin_to_count
 WHERE member_count >= {threshold}
-RETURN group_name, description, member_count, admin_to_count
+RETURN group_name, description, member_count, admin_to_count, group_t0
 ORDER BY member_count DESC
 """
 
@@ -33,8 +34,9 @@ ORDER BY member_count DESC
 # multi-MATCH issues in BH CE Cypher).
 _CYPHER_FALLBACK = """
 MATCH (g:Group {{domain: "{domain}"}})-[:AdminTo]->(c:Computer)
-WITH g.name AS group_name, count(DISTINCT c) AS admin_to_count
-RETURN group_name, admin_to_count
+WITH g.name AS group_name, g.system_tags AS group_t0,
+     count(DISTINCT c) AS admin_to_count
+RETURN group_name, admin_to_count, group_t0
 ORDER BY admin_to_count DESC
 LIMIT 50
 """
@@ -69,6 +71,7 @@ class LargeGroupAdminCheck(BaseCheck):
     def run(self, session: BHSession, domain: str, **kwargs) -> CheckResult:
         threshold = kwargs.get("large_group_threshold", 300)
         rows: list[list[str]] = []
+        tier_zero: list[bool] = []
 
         # Probe: check if AdminTo edges exist at all
         log.info("Probing for AdminTo edges in the graph ...")
@@ -111,7 +114,7 @@ class LargeGroupAdminCheck(BaseCheck):
             literals = result.get("literals", [])
             log.info("  %d literals returned", len(literals))
 
-            parsed = _parse_literal_rows(literals, 4)
+            parsed = _parse_literal_rows(literals, 5)
             for lr in parsed:
                 admin_ct = lr.get("admin_to_count", 0)
                 if isinstance(admin_ct, (int, float)) and admin_ct == 0:
@@ -122,6 +125,8 @@ class LargeGroupAdminCheck(BaseCheck):
                     str(lr.get("member_count", "")),
                     str(admin_ct),
                 ])
+                t0_val = lr.get("group_t0", "") or ""
+                tier_zero.append("admin_tier_0" in str(t0_val))
         except Exception as exc:
             log.warning("Primary query failed, trying fallback: %s", exc)
 
@@ -129,7 +134,7 @@ class LargeGroupAdminCheck(BaseCheck):
             try:
                 result = session.cypher(_CYPHER_FALLBACK.format(domain=domain))
                 literals = result.get("literals", [])
-                parsed = _parse_literal_rows(literals, 2)
+                parsed = _parse_literal_rows(literals, 3)
                 for lr in parsed:
                     admin_ct = lr.get("admin_to_count", 0)
                     if isinstance(admin_ct, (int, float)) and admin_ct == 0:
@@ -140,14 +145,20 @@ class LargeGroupAdminCheck(BaseCheck):
                         "(see BloodHound)",
                         str(admin_ct),
                     ])
+                    t0_val = lr.get("group_t0", "") or ""
+                    tier_zero.append("admin_tier_0" in str(t0_val))
             except Exception as exc2:
                 log.error("Fallback query also failed: %s", exc2)
                 rows.append(["ERROR", str(exc2), "", ""])
+                tier_zero.append(False)
 
-        rows.sort(
-            key=lambda r: int(r[2]) if r[2].isdigit() else 0,
+        paired = sorted(
+            zip(rows, tier_zero),
+            key=lambda p: int(p[0][2]) if p[0][2].isdigit() else 0,
             reverse=True,
         )
+        rows = [p[0] for p in paired]
+        tier_zero = [p[1] for p in paired]
 
         return CheckResult(
             check_id=self.check_id,
@@ -156,4 +167,5 @@ class LargeGroupAdminCheck(BaseCheck):
             headers=["Group", "Description", "Members", "Admin On # Computers"],
             rows=rows,
             severity="critical" if rows else "info",
+            extra={"tier_zero": tier_zero},
         )

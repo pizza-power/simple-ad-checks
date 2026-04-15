@@ -29,10 +29,11 @@ _CYPHER_TEMPLATE = """
 MATCH (g:Group {{name: "{group_fqdn}"}})-[r]->(target)
 WHERE NOT type(r) IN {exclude}
 RETURN g.name AS source, type(r) AS permission, target.name AS target_name,
-       labels(target) AS target_type, target.enabled AS target_enabled
+       labels(target) AS target_type, target.enabled AS target_enabled,
+       target.system_tags AS target_t0
 """
 
-RETURN_COLUMNS = ["source", "permission", "target_name", "target_type", "target_enabled"]
+RETURN_COLUMNS = ["source", "permission", "target_name", "target_type", "target_enabled", "target_t0"]
 
 
 def _parse_literal_rows(literals: list, num_columns: int) -> list[dict]:
@@ -80,6 +81,7 @@ class OutboundControlCheck(BaseCheck):
 
     def run(self, session: BHSession, domain: str, **kwargs) -> CheckResult:
         rows: list[list[str]] = []
+        tier_zero: list[bool] = []
         exclude_str = str(EXCLUDE_EDGES).replace("'", '"')
 
         for group in GROUPS:
@@ -92,6 +94,7 @@ class OutboundControlCheck(BaseCheck):
             except Exception as exc:
                 log.error("Cypher query failed for %s: %s", fqdn, exc)
                 rows.append([fqdn, "ERROR", str(exc), "", ""])
+                tier_zero.append(False)
                 continue
 
             nodes = result.get("nodes", {})
@@ -113,6 +116,8 @@ class OutboundControlCheck(BaseCheck):
                         _object_kind(lr.get("target_type")),
                         _enabled_status(lr.get("target_enabled")),
                     ])
+                    t0_val = lr.get("target_t0", "") or ""
+                    tier_zero.append("admin_tier_0" in str(t0_val))
                 continue
 
             # Strategy 2: Parse from nodes/edges (RETURN of full objects)
@@ -144,6 +149,8 @@ class OutboundControlCheck(BaseCheck):
                         _object_kind(target_labels),
                         _enabled_status(enabled),
                     ])
+                    t0_val = target_props.get("system_tags", "") or ""
+                    tier_zero.append("admin_tier_0" in str(t0_val))
                 continue
 
             log.info("  %s: no outbound control edges (clean)", fqdn)
@@ -155,4 +162,5 @@ class OutboundControlCheck(BaseCheck):
             headers=["Source Group", "Permission", "Target Object", "Target Type", "Status"],
             rows=rows,
             severity="high" if rows else "info",
+            extra={"tier_zero": tier_zero, "tier_zero_col": 2},
         )

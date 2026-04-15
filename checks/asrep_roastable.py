@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 
-from checks import BaseCheck, CheckResult, register
+from checks import BaseCheck, CheckResult, register, is_tier_zero
 from bhapi.client import BHSession
 
 log = logging.getLogger("adchecker.checks.asrep_roastable")
@@ -49,13 +49,17 @@ class ASREPRoastableCheck(BaseCheck):
         nodes = result.get("nodes", {})
         log.info("  %d nodes returned", len(nodes))
 
+        tier_zero: list[bool] = []
         for node_id, node in nodes.items():
             props = node.get("properties", {}) or {}
             name = props.get("name", node.get("label", node_id))
             desc = props.get("description", "") or ""
             rows.append([name, desc])
+            tier_zero.append(is_tier_zero(props))
 
-        rows.sort(key=lambda r: r[0])
+        paired = sorted(zip(rows, tier_zero), key=lambda p: p[0][0])
+        rows = [p[0] for p in paired]
+        tier_zero = [p[1] for p in paired]
 
         return CheckResult(
             check_id=self.check_id,
@@ -64,4 +68,5 @@ class ASREPRoastableCheck(BaseCheck):
             headers=["User", "Description"],
             rows=rows,
             severity="high" if rows else "info",
+            extra={"tier_zero": tier_zero},
         )

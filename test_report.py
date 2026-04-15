@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate a sample report with realistic mock data.
+Generate a sample report with realistic mock data for two domains.
 No BloodHound connection or .env required.
 
 Usage:
@@ -8,12 +8,13 @@ Usage:
 """
 
 from checks import CheckResult
-from report.renderer import write_report
+from report.renderer import write_multi_domain_report
 from pathlib import Path
 
-DOMAIN = "CORP.LOCAL"
+DOMAIN_1 = "CORP.LOCAL"
+DOMAIN_2 = "SUBSIDIARY.IO"
 
-SAMPLE_RESULTS = [
+RESULTS_CORP = [
     CheckResult(
         check_id="outbound_control",
         title="Outbound Object Control",
@@ -38,6 +39,10 @@ SAMPLE_RESULTS = [
             ["DOMAIN COMPUTERS@CORP.LOCAL", "GenericAll", "CERT-SRV01.CORP.LOCAL", "Computer", "Enabled"],
         ],
         severity="high",
+        extra={
+            "tier_zero": [False, False, False, False, False, False, True, False, False, False, True],
+            "tier_zero_col": 2,
+        },
     ),
     CheckResult(
         check_id="kerberoastable",
@@ -58,6 +63,7 @@ SAMPLE_RESULTS = [
             ["KRBTGT_OLD@CORP.LOCAL", "Legacy Kerberos service (decomm pending)", "No"],
         ],
         severity="high",
+        extra={"tier_zero": [True, True, False, False, False, False, False]},
     ),
     CheckResult(
         check_id="asrep_roastable",
@@ -73,6 +79,7 @@ SAMPLE_RESULTS = [
             ["SVC_OLDAPP@CORP.LOCAL", "Service account for retired COBOL bridge"],
         ],
         severity="high",
+        extra={"tier_zero": [False, False]},
     ),
     CheckResult(
         check_id="large_group_admin",
@@ -89,12 +96,82 @@ SAMPLE_RESULTS = [
             ["IT-ALL-STAFF@CORP.LOCAL", "All IT department staff", "312", "8"],
         ],
         severity="critical",
+        extra={"tier_zero": [False, False, False]},
+    ),
+]
+
+RESULTS_SUBSIDIARY = [
+    CheckResult(
+        check_id="outbound_control",
+        title="Outbound Object Control",
+        description=(
+            "Lists every object that the large default groups "
+            "(Everyone, Authenticated Users, Domain Users, Domain Computers) "
+            "have direct control over, along with the specific permission and "
+            "target object type."
+        ),
+        headers=["Source Group", "Permission", "Target Object", "Target Type", "Status"],
+        rows=[
+            ["DOMAIN USERS@SUBSIDIARY.IO", "GenericAll", "DEV-SRV01.SUBSIDIARY.IO", "Computer", "Enabled"],
+            ["DOMAIN USERS@SUBSIDIARY.IO", "WriteDacl", "JENKINS-SVC@SUBSIDIARY.IO", "User", "Enabled"],
+            ["EVERYONE@SUBSIDIARY.IO", "ReadLAPSPassword", "WS-DEV003.SUBSIDIARY.IO", "Computer", "Enabled"],
+        ],
+        severity="medium",
+        extra={"tier_zero": [False, False, False], "tier_zero_col": 2},
+    ),
+    CheckResult(
+        check_id="kerberoastable",
+        title="Kerberoastable Users",
+        description=(
+            "User accounts with a Service Principal Name (SPN) set. "
+            "These accounts are vulnerable to offline password cracking "
+            "via Kerberoasting. Prioritise accounts with admincount=true."
+        ),
+        headers=["User", "Description", "Admin Count"],
+        rows=[
+            ["SVC_JIRA@SUBSIDIARY.IO", "Jira service account", "No"],
+            ["SVC_GITLAB@SUBSIDIARY.IO", "GitLab CI/CD runner service", "Yes"],
+        ],
+        severity="high",
+        extra={"tier_zero": [False, True]},
+    ),
+    CheckResult(
+        check_id="asrep_roastable",
+        title="AS-REP Roastable Users",
+        description=(
+            "User accounts that do not require Kerberos pre-authentication. "
+            "An attacker can request an AS-REP for these accounts without "
+            "credentials and crack the response offline."
+        ),
+        headers=["User", "Description"],
+        rows=[],
+        severity="info",
+        extra={"tier_zero": []},
+    ),
+    CheckResult(
+        check_id="large_group_admin",
+        title="Large Groups with Admin Rights",
+        description=(
+            "Groups with a large membership that hold local administrator "
+            "rights on one or more computers. This means hundreds of users "
+            "potentially have admin access, dramatically increasing risk."
+        ),
+        headers=["Group", "Description", "Members", "Admin On # Computers"],
+        rows=[
+            ["DOMAIN USERS@SUBSIDIARY.IO", "All domain user accounts", "823", "14"],
+        ],
+        severity="high",
+        extra={"tier_zero": [False]},
     ),
 ]
 
 
 def main():
-    path = write_report(DOMAIN, SAMPLE_RESULTS, Path("./reports"))
+    domain_results = {
+        DOMAIN_1: RESULTS_CORP,
+        DOMAIN_2: RESULTS_SUBSIDIARY,
+    }
+    path = write_multi_domain_report(domain_results, Path("./reports"))
     print(f"Sample report written to: {path}")
     print(f"Open it in your browser:  file://{path.resolve()}")
 

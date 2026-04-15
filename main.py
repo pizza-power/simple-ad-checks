@@ -3,7 +3,7 @@
 adchecker — BloodHound CE security report generator.
 
 Config-driven (via .env), designed for unattended/cron execution.
-Generates one self-contained HTML report per configured domain.
+Generates a single self-contained HTML report with per-domain tabs.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import time
 import config
 from bhapi.client import BHSession
 from checks import get_all_checks, CheckResult
-from report.renderer import write_report
+from report.renderer import write_multi_domain_report
 
 log = logging.getLogger("adchecker")
 
@@ -95,6 +95,7 @@ def main() -> None:
         sys.exit(1)
 
     log.info("-" * 60)
+    domain_results: dict[str, list[CheckResult]] = {}
     for domain in config.BH_DOMAINS:
         log.info("Processing domain: %s", domain)
         results = run_domain(session, domain)
@@ -102,10 +103,11 @@ def main() -> None:
         total = sum(r.count for r in results)
         log.info("Domain %s complete — %d total findings", domain, total)
 
-        path = write_report(domain, results, config.BH_REPORT_DIR)
-        log.info("Report written: %s", path)
+        domain_results[domain] = results
         log.info("-" * 60)
 
+    path = write_multi_domain_report(domain_results, config.BH_REPORT_DIR)
+    log.info("Report written: %s", path)
     log.info("All domains complete.")
 
 

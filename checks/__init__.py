@@ -32,6 +32,12 @@ class CheckResult:
         return len(self.rows)
 
 
+def is_tier_zero(properties: dict) -> bool:
+    """Check if a node's system_tags indicate Tier Zero (High Value Target)."""
+    tags = properties.get("system_tags", "") or ""
+    return "admin_tier_0" in tags
+
+
 class BaseCheck(ABC):
     """
     Every check must implement ``run()`` and set the class-level
