@@ -147,21 +147,17 @@ class BHSession:
 
     def upload_file(self, job_id: int, file_path: str, timeout: int = 600) -> None:
         """Upload a zip/json file to an existing upload job (raw bytes)."""
-        uri = f"/api/v2/file-upload/{job_id}"
         with open(file_path, "rb") as f:
             raw = f.read()
 
-        url = f"{self._base_url}{uri}"
-        headers, _ = self._sign("POST", uri, raw)
-        headers["Content-Type"] = "application/octet-stream"
-
         log.info("Uploading %s (%.1f MB) ...", file_path, len(raw) / 1_048_576)
-        resp = self._http.request(
-            method="POST", url=url, headers=headers, data=raw, timeout=timeout,
+        self._request(
+            "POST",
+            f"/api/v2/file-upload/{job_id}",
+            raw_body=raw,
+            content_type="application/octet-stream",
+            timeout=timeout,
         )
-
-        if resp.status_code >= 400:
-            raise BHAPIError("POST", url, resp.status_code, resp.text)
 
     def end_upload(self, job_id: int) -> None:
         """Signal that all files for this job have been uploaded."""
@@ -188,6 +184,9 @@ class BHSession:
 
         The ``uri`` MUST include the query string if present, matching
         exactly what appears in the HTTP request line.
+
+        Content-Type is deliberately omitted — it is not part of the
+        HMAC signature and must be set by the caller per-request.
         """
         digester = hmac.new(self._token_key.encode(), None, hashlib.sha256)
 
@@ -209,7 +208,6 @@ class BHSession:
             "Authorization": f"bhesignature {self._token_id}",
             "RequestDate": now,
             "Signature": base64.b64encode(digester.digest()),
-            "Content-Type": "application/json",
         }
         return headers, now
 
@@ -218,6 +216,8 @@ class BHSession:
         method: str,
         uri: str,
         body: dict | None = None,
+        raw_body: bytes | None = None,
+        content_type: str = "application/json",
         timeout: int = 120,
     ) -> Any:
         """
@@ -225,13 +225,24 @@ class BHSession:
         baked into ``uri`` (e.g. ``/api/v2/foo?bar=1``).  This matches
         the official SpecterOps client pattern and guarantees the HMAC
         signature covers the exact URI sent on the wire.
+
+        Pass ``body`` for JSON payloads or ``raw_body`` for pre-encoded
+        binary (e.g. zip uploads).  The ``content_type`` header is set
+        accordingly.
         """
-        encoded_body = json.dumps(body).encode() if body else None
+        if raw_body is not None:
+            encoded_body = raw_body
+        elif body is not None:
+            encoded_body = json.dumps(body).encode()
+        else:
+            encoded_body = None
+
         url = f"{self._base_url}{uri}"
         backoff = self.RETRY_BACKOFF
 
         for attempt in range(1, self.MAX_RETRIES + 1):
             headers, _ = self._sign(method, uri, encoded_body)
+            headers["Content-Type"] = content_type
             log.debug("%s %s (attempt %d/%d)", method, url, attempt, self.MAX_RETRIES)
 
             try:
@@ -262,11 +273,16 @@ class BHSession:
                 )
                 raise BHAPIError(method, url, resp.status_code, resp.text)
 
+            # Some endpoints (file upload) return empty or non-JSON 2xx
+            if not resp.content or not resp.content.strip():
+                log.debug("Empty response body (HTTP %d)", resp.status_code)
+                return {}
+
             try:
                 data = resp.json()
             except ValueError:
-                log.error("Non-JSON response from %s %s: %s", method, url, resp.text[:200])
-                raise BHAPIError(method, url, resp.status_code, f"Non-JSON response: {resp.text[:200]}")
+                log.debug("Non-JSON response (HTTP %d): %s", resp.status_code, resp.text[:200])
+                return {}
 
             return data.get("data", data)
 
