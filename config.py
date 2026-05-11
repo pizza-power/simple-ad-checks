@@ -29,4 +29,5 @@ BH_DOMAINS: list[str] = [
 ]
 
 BH_REPORT_DIR: Path = Path(os.getenv("BH_REPORT_DIR", "./reports"))
+BH_UPLOAD_DIR: Path = Path(os.getenv("BH_UPLOAD_DIR", "./data"))
 BH_LARGE_GROUP_THRESHOLD: int = int(os.getenv("BH_LARGE_GROUP_THRESHOLD", "300"))

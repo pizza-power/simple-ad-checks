@@ -137,6 +137,47 @@ class BHSession:
         return items
 
     # ------------------------------------------------------------------
+    # File upload (SharpHound / BloodHound zip ingest)
+    # ------------------------------------------------------------------
+
+    def start_upload(self) -> int:
+        """Create a file upload job. Returns the job ID."""
+        resp = self.post("/api/v2/file-upload/start")
+        return resp["id"]
+
+    def upload_file(self, job_id: int, file_path: str, timeout: int = 600) -> None:
+        """Upload a zip/json file to an existing upload job (raw bytes)."""
+        uri = f"/api/v2/file-upload/{job_id}"
+        with open(file_path, "rb") as f:
+            raw = f.read()
+
+        url = f"{self._base_url}{uri}"
+        headers, _ = self._sign("POST", uri, raw)
+        headers["Content-Type"] = "application/octet-stream"
+
+        log.info("Uploading %s (%.1f MB) ...", file_path, len(raw) / 1_048_576)
+        resp = self._http.request(
+            method="POST", url=url, headers=headers, data=raw, timeout=timeout,
+        )
+
+        if resp.status_code >= 400:
+            raise BHAPIError("POST", url, resp.status_code, resp.text)
+
+    def end_upload(self, job_id: int) -> None:
+        """Signal that all files for this job have been uploaded."""
+        self.post(f"/api/v2/file-upload/{job_id}/end")
+
+    UPLOAD_STATUS_LABELS = {
+        -1: "Invalid", 0: "Ready", 1: "Running", 2: "Complete",
+        3: "Canceled", 4: "Timed Out", 5: "Failed",
+        6: "Ingesting", 7: "Analyzing", 8: "Partially Complete",
+    }
+
+    def get_upload_status(self, job_id: int) -> dict:
+        """Get the current status of an upload job."""
+        return self.get(f"/api/v2/file-upload/{job_id}")
+
+    # ------------------------------------------------------------------
     # HMAC request signing (per SpecterOps spec)
     # ------------------------------------------------------------------
 
